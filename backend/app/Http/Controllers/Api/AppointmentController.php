@@ -74,10 +74,11 @@ class AppointmentController extends Controller
     }
 
     /**
-     * Schedule or reschedule a reminder.
+     * Schedule or reschedule an appointment.
      */
-    public function schedule(Appointment $appointment)
+    public function schedule(Request $request, Appointment $appointment)
     {
+        // Prevent rescheduling cancelled or expired appointments.
         if (in_array($appointment->status, ['cancelled', 'expired'])) {
             return response()->json([
                 'message' =>
@@ -85,32 +86,47 @@ class AppointmentController extends Controller
             ], 422);
         }
 
-        if ($appointment->appointment_at->isPast()) {
-            return response()->json([
-                'message' => 'The appointment date has already passed.',
-            ], 422);
-        }
+        // Validate the new appointment and reminder dates.
+        $validated = $request->validate([
+            'appointment_at' => [
+                'required',
+                'date',
+                'after:now',
+            ],
+            'reminder_at' => [
+                'required',
+                'date',
+                'after:now',
+                'before:appointment_at',
+            ],
+        ]);
 
+        // Save the new dates and reset delivery information.
         $appointment->update([
+            'appointment_at' => $validated['appointment_at'],
+            'reminder_at' => $validated['reminder_at'],
             'status' => 'scheduled',
             'attempts' => 0,
             'last_error' => null,
             'delivered_at' => null,
-            'next_attempt_at' => $appointment->reminder_at->isPast()
-                ? now()
-                : $appointment->reminder_at,
+            'next_attempt_at' => $validated['reminder_at'],
         ]);
 
+        // Record the rescheduling activity.
         $appointment->logs()->create([
-            'event' => 'reminder_scheduled',
+            'event' => 'appointment_rescheduled',
             'level' => 'info',
-            'message' => 'Reminder scheduled for processing.',
+            'message' => 'Appointment and reminder successfully rescheduled.',
             'attempt' => 0,
+            'context' => [
+                'new_appointment_at' => $validated['appointment_at'],
+                'new_reminder_at' => $validated['reminder_at'],
+            ],
         ]);
 
         return response()->json([
-            'message' => 'Reminder scheduled.',
-            'data' => $appointment->load('logs'),
+            'message' => 'Appointment rescheduled successfully.',
+            'data' => $appointment->fresh()->load('logs'),
         ]);
     }
 
@@ -147,8 +163,6 @@ class AppointmentController extends Controller
 
     /**
      * Record a human review decision.
-     *
-     * A reviewer can correct the simulation mode before rescheduling.
      */
     public function resolveReview(
         Request $request,
@@ -174,9 +188,7 @@ class AppointmentController extends Controller
             ], 422);
         }
 
-        /*
-         * Do not reschedule an appointment that has already expired.
-         */
+        // Close the review if the appointment has expired.
         if ($appointment->appointment_at->isPast()) {
             $appointment->update([
                 'status' => 'expired',
@@ -201,10 +213,6 @@ class AppointmentController extends Controller
             ]);
         }
 
-        /*
-         * Apply the reviewed delivery mode.
-         * Defaults to success only when the caller omits this field.
-         */
         $newSimulationMode = $validated['simulation_mode']
             ?? $appointment->simulation_mode;
 
